@@ -16,12 +16,29 @@ This repository contains setup scripts and documentation for establishing a comp
 # Run non-interactive auto setup
 ./superCoderSetup.sh --auto
 
+# Configure for a specific project
+./superCoderSetup.sh --project-path /path/to/your/project
+
+# Configure for a specific project with auto setup
+./superCoderSetup.sh -p /path/to/your/project --auto
+
 # The script provides:
 # - Interactive menu system with status checking
 # - Guided installation for missing components
 # - API key configuration with instructions
+# - Project-specific MCP server configuration
 # - Troubleshooting help
 ```
+
+### Project-Specific Configuration
+
+When using the `--project-path` or `-p` option, the script will automatically configure MCP servers optimized for your specific project:
+
+**Filesystem MCP**: Adds your project directory to allowed paths for secure file access
+**GitMCP**: Automatically configures with your project's repository path and detects the default branch
+**Knowledge Graph Memory**: Creates a project-specific database for dependency mapping
+**Memory Bank**: Uses your project name as the namespace for persistent memory
+**Obsidian MCP**: Optionally uses project documentation folders (docs/, documentation/, wiki/)
 
 ### MCP Server Management
 ```bash

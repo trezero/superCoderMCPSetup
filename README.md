@@ -14,6 +14,9 @@ chmod +x superCoderSetup.sh
 
 # Run the interactive installer
 ./superCoderSetup.sh
+
+# Or configure for a specific project
+./superCoderSetup.sh --project-path /path/to/your/project
 ```
 
 ## 📋 Prerequisites
@@ -33,8 +36,9 @@ The SuperCoder MCP Setup provides an interactive CLI that:
 1. **Checks your system** for required software and shows what's installed/missing
 2. **Guides installation** of prerequisites with clear instructions
 3. **Configures MCP servers** with step-by-step API key setup
-4. **Manages persistent storage** for configurations and server data
-5. **Provides troubleshooting** help for common issues
+4. **Optimizes for specific projects** with intelligent path detection and configuration
+5. **Manages persistent storage** for configurations and server data
+6. **Provides troubleshooting** help for common issues
 
 ## 🛠️ MCP Servers Included
 
@@ -82,6 +86,33 @@ For non-interactive installation:
 
 This will attempt to install everything with default settings.
 
+### Project-Specific Setup
+
+Configure MCP servers optimized for your specific project:
+
+```bash
+# Interactive setup for a specific project
+./superCoderSetup.sh --project-path /home/user/my-app
+
+# Automated setup for a specific project
+./superCoderSetup.sh -p /workspace/project --auto
+
+# Show help and usage
+./superCoderSetup.sh --help
+```
+
+#### Project Optimization Features
+
+When using `--project-path` or `-p`, the installer automatically:
+
+- **📁 Filesystem MCP**: Adds your project directory to allowed paths for secure file access
+- **🔄 GitMCP**: Configures with your project's repository path and auto-detects the default branch
+- **🧠 Knowledge Graph**: Creates a project-specific database for dependency and relationship mapping
+- **💾 Memory Bank**: Uses your project name as the namespace for persistent, project-scoped memory
+- **📚 Obsidian MCP**: Optionally integrates project documentation folders (`docs/`, `documentation/`, `wiki/`)
+
+The installer validates the project path, detects if it's a Git repository, and extracts a sanitized project name for consistent naming across all MCP services.
+
 ## 🔑 API Keys
 
 ### Context7
@@ -109,10 +140,11 @@ This will attempt to install everything with default settings.
 ### Customizing Paths
 
 During setup, you can customize:
-- Filesystem access paths (default: `/workspace`, `~/projects`)
-- Git repository paths
-- Obsidian vault location
-- Knowledge Graph database location
+- Filesystem access paths (default: `/workspace`, `~/projects`, plus project path if specified)
+- Git repository paths (auto-detected for project mode)
+- Obsidian vault location (can use project docs folders)
+- Knowledge Graph database location (project-specific when using `--project-path`)
+- Memory Bank namespace (uses project name when available)
 
 ## 🔧 Usage
 
@@ -235,6 +267,16 @@ claude mcp edit <server-name>
 
 ### Multiple Projects
 
+#### Option 1: Use Project-Specific Setup (Recommended)
+```bash
+# Configure for project A
+./superCoderSetup.sh --project-path /home/user/project-a --auto
+
+# Later, reconfigure for project B
+./superCoderSetup.sh --project-path /home/user/project-b --auto
+```
+
+#### Option 2: Manual Namespace Configuration
 Use different Memory Bank namespaces for different projects:
 ```bash
 claude mcp add memory-bank \
@@ -265,9 +307,12 @@ This project is open source. See LICENSE file for details.
 
 ## 💡 Tips
 
+- **Use Project Mode**: Always use `--project-path` for better integration and project-specific configurations
 - **Start Simple**: Begin with basic servers (Filesystem, Sequential Thinking) before adding all servers
 - **Test Incrementally**: Verify each server works before adding the next
 - **Save API Keys**: The installer saves your API keys for future use
+- **Git Integration**: Ensure your project is a Git repository for optimal GitMCP functionality
+- **Documentation Structure**: Organize project docs in `docs/`, `documentation/`, or `wiki/` folders for Obsidian integration
 - **Regular Updates**: Keep servers updated with `npm update -g` for global packages
 
 ## 📞 Support

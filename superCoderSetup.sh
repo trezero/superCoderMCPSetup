@@ -24,6 +24,11 @@ DOCKER_COMPOSE_INSTALLED=false
 CLAUDE_CLI_INSTALLED=false
 MEMORY_BANK_RUNNING=false
 
+# Project configuration
+PROJECT_PATH=""
+PROJECT_NAME=""
+AUTO_MODE=false
+
 # Configuration storage
 CONFIG_FILE="$HOME/.supercoder_config"
 
@@ -98,6 +103,75 @@ get_input() {
 # Function to check if a command exists
 command_exists() {
     command -v "$1" >/dev/null 2>&1
+}
+
+# Function to validate and set project path
+validate_project_path() {
+    local path="$1"
+    
+    # Convert to absolute path
+    if [[ "$path" != /* ]]; then
+        path="$(pwd)/$path"
+    fi
+    
+    # Resolve any symbolic links and normalize path
+    if command_exists realpath; then
+        path=$(realpath "$path" 2>/dev/null || echo "$path")
+    fi
+    
+    # Validate path exists and is accessible
+    if [ ! -d "$path" ]; then
+        print_status "missing" "Project path does not exist: $path"
+        return 1
+    fi
+    
+    if [ ! -r "$path" ]; then
+        print_status "missing" "Project path is not readable: $path"
+        return 1
+    fi
+    
+    # Extract project name from path
+    local project_name=$(basename "$path")
+    
+    # Sanitize project name for use in namespaces/databases
+    project_name=$(echo "$project_name" | sed 's/[^a-zA-Z0-9_-]//g' | tr '[:upper:]' '[:lower:]')
+    
+    if [ -z "$project_name" ]; then
+        project_name="project"
+    fi
+    
+    PROJECT_PATH="$path"
+    PROJECT_NAME="$project_name"
+    
+    print_status "ok" "Project path validated: $PROJECT_PATH"
+    print_status "info" "Project name: $PROJECT_NAME"
+    
+    # Check if it's a git repository
+    if [ -d "$PROJECT_PATH/.git" ]; then
+        print_status "ok" "Git repository detected"
+    else
+        print_status "info" "Not a git repository"
+    fi
+    
+    return 0
+}
+
+# Function to show usage information
+show_usage() {
+    echo "Usage: $0 [OPTIONS]"
+    echo
+    echo "OPTIONS:"
+    echo "  --auto                    Run complete setup without prompts"
+    echo "  --project-path PATH       Configure MCP servers for specific project"
+    echo "  -p PATH                   Alias for --project-path"
+    echo "  --help, -h                Show this help message"
+    echo
+    echo "EXAMPLES:"
+    echo "  $0                        Interactive mode"
+    echo "  $0 --auto                 Automatic setup"
+    echo "  $0 -p /home/user/myproject Configure for specific project"
+    echo "  $0 --project-path /workspace/app --auto"
+    echo
 }
 
 # Function to save configuration
@@ -394,6 +468,13 @@ setup_mcp_servers() {
     if ! claude mcp info filesystem >/dev/null 2>&1; then
         if ask_yes_no "Configure Filesystem MCP? (for file access)" "y"; then
             local default_paths="/workspace,$HOME/projects"
+            
+            # Add project path to default if specified
+            if [ -n "$PROJECT_PATH" ]; then
+                default_paths="$PROJECT_PATH,$default_paths"
+                print_status "info" "Including project path in filesystem access: $PROJECT_PATH"
+            fi
+            
             local fs_paths=$(get_input "Enter allowed paths (comma-separated)" "$default_paths")
             local readonly=$(ask_yes_no "Make filesystem read-only?" "n" && echo "true" || echo "false")
             
@@ -439,13 +520,32 @@ setup_mcp_servers() {
     # GitMCP
     if ! claude mcp info gitmcp >/dev/null 2>&1; then
         if ask_yes_no "Configure GitMCP? (for Git awareness)" "y"; then
-            local repo_path=$(get_input "Git repository path" "/workspace/repo")
-            local default_branch=$(get_input "Default branch" "main")
+            local default_repo_path="/workspace/repo"
+            local default_branch="main"
+            
+            # Use project path if it's a git repository
+            if [ -n "$PROJECT_PATH" ] && [ -d "$PROJECT_PATH/.git" ]; then
+                default_repo_path="$PROJECT_PATH"
+                print_status "info" "Using project path as Git repository: $PROJECT_PATH"
+                
+                # Try to detect the default branch
+                if cd "$PROJECT_PATH" 2>/dev/null; then
+                    local detected_branch=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@' || echo "main")
+                    if [ -n "$detected_branch" ]; then
+                        default_branch="$detected_branch"
+                        print_status "info" "Detected default branch: $default_branch"
+                    fi
+                    cd - >/dev/null
+                fi
+            fi
+            
+            local repo_path=$(get_input "Git repository path" "$default_repo_path")
+            local branch=$(get_input "Default branch" "$default_branch")
             local allow_write=$(ask_yes_no "Allow Git write operations?" "n" && echo "true" || echo "false")
             
             configure_mcp_server "gitmcp" "npx -y gitmcp@latest" \
                 "GIT_REPO_PATH=$repo_path" \
-                "GIT_DEFAULT_BRANCH=$default_branch" \
+                "GIT_DEFAULT_BRANCH=$branch" \
                 "GIT_ALLOW_WRITE=$allow_write"
         fi
     fi
@@ -454,7 +554,27 @@ setup_mcp_servers() {
     if ! claude mcp info obsidian >/dev/null 2>&1; then
         if ask_yes_no "Configure Obsidian MCP? (for knowledge base)" "y"; then
             print_status "info" "Make sure you have an Obsidian vault on this system"
-            local vault_path=$(get_input "Obsidian vault path" "$HOME/Obsidian/MyVault")
+            local default_vault="$HOME/Obsidian/MyVault"
+            
+            # Check for project documentation folders
+            if [ -n "$PROJECT_PATH" ]; then
+                local project_docs=""
+                for docs_dir in "docs" "documentation" "wiki" ".obsidian"; do
+                    if [ -d "$PROJECT_PATH/$docs_dir" ]; then
+                        project_docs="$PROJECT_PATH/$docs_dir"
+                        break
+                    fi
+                done
+                
+                if [ -n "$project_docs" ]; then
+                    print_status "info" "Found project documentation: $project_docs"
+                    if ask_yes_no "Use project documentation folder instead of Obsidian vault?" "n"; then
+                        default_vault="$project_docs"
+                    fi
+                fi
+            fi
+            
+            local vault_path=$(get_input "Obsidian vault path" "$default_vault")
             local readonly=$(ask_yes_no "Make Obsidian read-only?" "y" && echo "true" || echo "false")
             
             configure_mcp_server "obsidian" "npx -y mcp-obsidian@latest" \
@@ -466,8 +586,22 @@ setup_mcp_servers() {
     # Knowledge Graph Memory
     if ! claude mcp info kg-memory >/dev/null 2>&1; then
         if ask_yes_no "Configure Knowledge Graph Memory MCP?" "y"; then
-            local db_path=$(get_input "Database path" "/workspace/.kgmcp/db.sqlite")
+            local default_db_path="/workspace/.kgmcp/db.sqlite"
+            
+            # Use project-specific database path if project is configured
+            if [ -n "$PROJECT_PATH" ] && [ -n "$PROJECT_NAME" ]; then
+                default_db_path="$PROJECT_PATH/.kgmcp/${PROJECT_NAME}-kg.sqlite"
+                print_status "info" "Using project-specific database: $default_db_path"
+            fi
+            
+            local db_path=$(get_input "Database path" "$default_db_path")
             local max_nodes=$(get_input "Maximum nodes" "50000")
+            
+            # Create directory if it doesn't exist
+            local db_dir=$(dirname "$db_path")
+            if [ ! -d "$db_dir" ]; then
+                mkdir -p "$db_dir" || print_status "warning" "Could not create directory: $db_dir"
+            fi
             
             configure_mcp_server "kg-memory" "npx -y mcp-knowledge-graph@latest" \
                 "KG_DB_PATH=$db_path" \
@@ -485,7 +619,15 @@ setup_mcp_servers() {
                 fi
             fi
             
-            local namespace=$(get_input "Project namespace" "default-project")
+            local default_namespace="default-project"
+            
+            # Use project name as namespace if configured
+            if [ -n "$PROJECT_NAME" ]; then
+                default_namespace="$PROJECT_NAME"
+                print_status "info" "Using project name as namespace: $PROJECT_NAME"
+            fi
+            
+            local namespace=$(get_input "Project namespace" "$default_namespace")
             
             configure_mcp_server "memory-bank" "npx -y memory-bank-mcp@latest" \
                 "MEMORY_BANK_URL=http://localhost:8080" \
@@ -580,15 +722,62 @@ run_complete_setup() {
     check_mcp_servers
 }
 
+# Function to parse command line arguments
+parse_arguments() {
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --auto)
+                AUTO_MODE=true
+                shift
+                ;;
+            --project-path|-p)
+                if [ -n "${2:-}" ]; then
+                    if validate_project_path "$2"; then
+                        shift 2
+                    else
+                        print_color "$RED" "Invalid project path: $2"
+                        exit 1
+                    fi
+                else
+                    print_color "$RED" "Error: --project-path requires a path argument"
+                    show_usage
+                    exit 1
+                fi
+                ;;
+            --help|-h)
+                show_usage
+                exit 0
+                ;;
+            *)
+                print_color "$RED" "Unknown option: $1"
+                show_usage
+                exit 1
+                ;;
+        esac
+    done
+}
+
 # Main script
 main() {
+    # Parse command line arguments first
+    parse_arguments "$@"
+    
     clear
     print_color "$CYAN" "╔════════════════════════════════════════════════════════════════╗"
     print_color "$CYAN" "║           SuperCoder MCP Setup - Interactive Installer          ║"
     print_color "$CYAN" "╚════════════════════════════════════════════════════════════════╝"
     
+    # Show project information if configured
+    if [ -n "$PROJECT_PATH" ]; then
+        echo
+        print_color "$GREEN" "Project Configuration:"
+        print_status "info" "Project Path: $PROJECT_PATH"
+        print_status "info" "Project Name: $PROJECT_NAME"
+        echo
+    fi
+    
     # Check if running non-interactively
-    if [ "${1:-}" = "--auto" ]; then
+    if [ "$AUTO_MODE" = true ]; then
         run_complete_setup
         exit 0
     fi
