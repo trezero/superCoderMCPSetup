@@ -31,12 +31,87 @@ AUTO_MODE=false
 
 # Configuration storage
 CONFIG_FILE="$HOME/.supercoder_config"
+ENV_FILE="$(dirname "$0")/.env"
+LOG_DIR="$(dirname "$0")/logs"
+LOG_FILE="$LOG_DIR/supercoder-$(date +%Y%m%d-%H%M%S).log"
+LATEST_LOG_LINK="$LOG_DIR/latest.log"
 
-# Function to print colored output
+# Default ports
+DEFAULT_MEMORY_BANK_PORT=8081
+DEFAULT_ARCHON_MCP_PORT=8051
+
+# Function to initialize logging
+init_logging() {
+    # Create log directory if it doesn't exist
+    mkdir -p "$LOG_DIR"
+    
+    # Create new log file
+    touch "$LOG_FILE"
+    
+    # Create/update symlink to latest log
+    rm -f "$LATEST_LOG_LINK"
+    ln -s "$(basename "$LOG_FILE")" "$LATEST_LOG_LINK"
+    
+    # Log session start
+    log_message "INFO" "=== SuperCoder MCP Setup Session Started ==="
+    log_message "INFO" "Log file: $LOG_FILE"
+    log_message "INFO" "Arguments: $*"
+    log_message "INFO" "Working directory: $(pwd)"
+    log_message "INFO" "User: $(whoami)"
+    log_message "INFO" "Date: $(date)"
+    
+    # Clean up old logs (keep last 10)
+    cleanup_old_logs
+}
+
+# Function to log messages with timestamp
+log_message() {
+    local level=$1
+    shift
+    local message="$*"
+    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    echo "[$timestamp] [$level] $message" >> "$LOG_FILE"
+}
+
+# Function to log command execution
+log_command() {
+    local cmd="$*"
+    log_message "CMD" "Executing: $cmd"
+    
+    # Execute command and capture both stdout and stderr
+    local exit_code=0
+    {
+        eval "$cmd" 2>&1 | while IFS= read -r line; do
+            echo "[$timestamp] [OUT] $line" >> "$LOG_FILE"
+            echo "$line"  # Still show on screen
+        done
+        echo ${PIPESTATUS[0]} > /tmp/supercoder_exit_code
+    }
+    
+    exit_code=$(cat /tmp/supercoder_exit_code 2>/dev/null || echo "0")
+    rm -f /tmp/supercoder_exit_code
+    
+    log_message "CMD" "Command completed with exit code: $exit_code"
+    return $exit_code
+}
+
+# Function to cleanup old logs
+cleanup_old_logs() {
+    local log_count=$(ls -1 "$LOG_DIR"/supercoder-*.log 2>/dev/null | wc -l)
+    if [ "$log_count" -gt 10 ]; then
+        local files_to_delete=$((log_count - 10))
+        ls -1t "$LOG_DIR"/supercoder-*.log | tail -n "$files_to_delete" | xargs rm -f
+        log_message "INFO" "Cleaned up $files_to_delete old log files"
+    fi
+}
+
+# Function to print colored output with logging
 print_color() {
     local color=$1
     shift
-    echo -e "${color}$*${NC}"
+    local message="$*"
+    echo -e "${color}${message}${NC}"
+    log_message "DISPLAY" "$message"
 }
 
 # Function to print section headers
@@ -52,15 +127,23 @@ print_header() {
 print_status() {
     local status=$1
     local message=$2
+    local full_message=""
+    
     if [ "$status" = "ok" ]; then
-        print_color "$GREEN" "  $CHECK $message"
+        full_message="  $CHECK $message"
+        print_color "$GREEN" "$full_message"
     elif [ "$status" = "missing" ]; then
-        print_color "$RED" "  $CROSS $message"
+        full_message="  $CROSS $message"
+        print_color "$RED" "$full_message"
     elif [ "$status" = "info" ]; then
-        print_color "$CYAN" "  $INFO $message"
+        full_message="  $INFO $message"
+        print_color "$CYAN" "$full_message"
     elif [ "$status" = "warning" ]; then
-        print_color "$YELLOW" "  ⚠ $message"
+        full_message="  ⚠ $message"
+        print_color "$YELLOW" "$full_message"
     fi
+    
+    log_message "STATUS" "[$status] $message"
 }
 
 # Function to ask yes/no questions
@@ -202,6 +285,88 @@ load_config() {
     fi
 }
 
+# Function to load environment variables from .env file
+load_env() {
+    if [ -f "$ENV_FILE" ]; then
+        # Export variables from .env file, ignoring comments and empty lines
+        set -a
+        source "$ENV_FILE" 2>/dev/null || {
+            print_status "warning" "Failed to load .env file, using defaults"
+            set +a
+            return 1
+        }
+        set +a
+        print_status "info" "Loaded configuration from .env file"
+    else
+        print_status "info" "No .env file found, using defaults"
+    fi
+}
+
+# Function to get port from environment with fallback
+get_port() {
+    local port_var=$1
+    local default_port=$2
+    local backup_var=$3
+    
+    local port_value="${!port_var}"
+    if [ -n "$port_value" ]; then
+        echo "$port_value"
+    elif [ -n "$backup_var" ]; then
+        local backup_value="${!backup_var}"
+        if [ -n "$backup_value" ]; then
+            echo "$backup_value"
+        else
+            echo "$default_port"
+        fi
+    else
+        echo "$default_port"
+    fi
+}
+
+# Function to check if port is available
+is_port_available() {
+    local port=$1
+    ! netstat -tlnp 2>/dev/null | grep -q ":$port "
+}
+
+# Function to find available port
+find_available_port() {
+    local primary_port=$1
+    local backup_port=$2
+    local base_port=${3:-$primary_port}
+    
+    if is_port_available "$primary_port"; then
+        echo "$primary_port"
+        return 0
+    fi
+    
+    if [ -n "$backup_port" ] && is_port_available "$backup_port"; then
+        print_status "warning" "Primary port $primary_port in use, using backup port $backup_port"
+        echo "$backup_port"
+        return 0
+    fi
+    
+    # Try to find next available port starting from base
+    local port=$base_port
+    local max_attempts=20
+    local attempts=0
+    
+    while [ $attempts -lt $max_attempts ]; do
+        if is_port_available "$port"; then
+            if [ "$port" != "$primary_port" ]; then
+                print_status "warning" "Primary port $primary_port in use, using available port $port"
+            fi
+            echo "$port"
+            return 0
+        fi
+        port=$((port + 1))
+        attempts=$((attempts + 1))
+    done
+    
+    print_status "missing" "Could not find available port starting from $base_port"
+    return 1
+}
+
 # Function to check prerequisites
 check_prerequisites() {
     print_header "System Status Check"
@@ -235,6 +400,7 @@ check_prerequisites() {
         local compose_version=$(docker compose version --short 2>/dev/null || echo "unknown")
         print_status "ok" "Docker Compose installed: $compose_version"
     else
+        DOCKER_COMPOSE_INSTALLED=false
         print_status "missing" "Docker Compose not installed"
     fi
     
@@ -248,12 +414,23 @@ check_prerequisites() {
     
     # Check Memory Bank status
     if [ "$DOCKER_INSTALLED" = true ]; then
-        if docker ps --format '{{.Names}}' | grep -q '^memory-bank$'; then
-            if curl -sfS http://localhost:8080 >/dev/null 2>&1; then
+        if docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^memory-bank$' 2>/dev/null; then
+            # Try to determine which port is being used
+            local used_port=$(load_config "MEMORY_BANK_USED_PORT" "")
+            if [ -z "$used_port" ]; then
+                # Fallback: try to detect from docker inspect
+                used_port=$(docker port memory-bank 8080/tcp 2>/dev/null | cut -d: -f2 || echo "")
+            fi
+            if [ -z "$used_port" ]; then
+                # Last fallback: try configured port
+                used_port=$(get_port "MEMORY_BANK_PORT" "$DEFAULT_MEMORY_BANK_PORT")
+            fi
+            
+            if curl -sfS http://localhost:$used_port >/dev/null 2>&1; then
                 MEMORY_BANK_RUNNING=true
-                print_status "ok" "Memory Bank server is running"
+                print_status "ok" "Memory Bank server is running on port $used_port"
             else
-                print_status "warning" "Memory Bank container running but API not responding"
+                print_status "warning" "Memory Bank container running but API not responding on port $used_port"
             fi
         else
             print_status "info" "Memory Bank server not running"
@@ -339,11 +516,25 @@ install_docker_compose() {
 # Function to setup Memory Bank
 setup_memory_bank() {
     print_header "Setting up Memory Bank Server"
+    log_message "INFO" "Starting Memory Bank setup process"
     
     if [ "$DOCKER_INSTALLED" = false ]; then
         print_status "missing" "Docker is required for Memory Bank. Please install Docker first."
+        log_message "ERROR" "Memory Bank setup failed: Docker not installed"
         return 1
     fi
+    
+    # Determine port to use
+    local primary_port=$(get_port "MEMORY_BANK_PORT" "$DEFAULT_MEMORY_BANK_PORT")
+    local backup_port=$(get_port "MEMORY_BANK_BACKUP_PORT" "")
+    local memory_bank_port=$(find_available_port "$primary_port" "$backup_port" "$DEFAULT_MEMORY_BANK_PORT")
+    
+    if [ $? -ne 0 ]; then
+        print_status "missing" "Could not find available port for Memory Bank"
+        return 1
+    fi
+    
+    print_status "info" "Using port $memory_bank_port for Memory Bank server"
     
     print_status "info" "Cloning Memory Bank repository..."
     if [ ! -d "$HOME/memory-bank-mcp" ]; then
@@ -361,7 +552,7 @@ setup_memory_bank() {
         docker build -t memory-bank-mcp .
         docker run -d \
             --name memory-bank \
-            -p 8080:8080 \
+            -p $memory_bank_port:8080 \
             -e MEMORY_BANK_STORAGE_DIR=/data \
             -v memory-bank-data:/data \
             --restart unless-stopped \
@@ -371,9 +562,12 @@ setup_memory_bank() {
     print_status "info" "Waiting for Memory Bank to start..."
     sleep 5
     
-    if curl -sfS http://localhost:8080 >/dev/null 2>&1; then
-        print_status "ok" "Memory Bank server is running!"
+    if curl -sfS http://localhost:$memory_bank_port >/dev/null 2>&1; then
+        print_status "ok" "Memory Bank server is running on port $memory_bank_port!"
         MEMORY_BANK_RUNNING=true
+        
+        # Save the port used for future reference
+        save_config "MEMORY_BANK_USED_PORT" "$memory_bank_port"
     else
         print_status "warning" "Memory Bank may still be starting. Check with: docker logs memory-bank"
     fi
@@ -423,44 +617,65 @@ configure_mcp_server() {
     local env_args=("$@")
     
     print_color "$CYAN" "Configuring $server_name..."
+    log_message "INFO" "Starting configuration of MCP server: $server_name"
     
     # Build the command
     local cmd="claude mcp add $server_name"
     for env_arg in "${env_args[@]}"; do
         cmd="$cmd -e $env_arg"
+        log_message "INFO" "Adding environment variable: $env_arg"
     done
     cmd="$cmd -- $server_cmd"
     
-    # Execute the command
-    eval "$cmd"
+    log_message "INFO" "MCP server command: $server_cmd"
     
+    # Execute the command with logging
+    log_message "CMD" "Executing MCP configuration: $cmd"
+    if eval "$cmd" 2>&1 | tee -a "$LOG_FILE"; then
+        log_message "INFO" "MCP add command completed successfully"
+    else
+        log_message "ERROR" "MCP add command failed with exit code: $?"
+    fi
+    
+    # Verify configuration
     if claude mcp info "$server_name" >/dev/null 2>&1; then
         print_status "ok" "$server_name configured successfully!"
+        log_message "SUCCESS" "$server_name MCP server configured and verified"
     else
         print_status "warning" "$server_name configuration may have failed"
+        log_message "WARNING" "$server_name MCP server configuration verification failed"
+        
+        # Get detailed error information
+        log_message "DEBUG" "Attempting to get MCP server info for debugging..."
+        claude mcp info "$server_name" 2>&1 | tee -a "$LOG_FILE" || log_message "ERROR" "Failed to get MCP server info"
     fi
 }
 
 # Function to setup individual MCP servers
 setup_mcp_servers() {
     print_header "MCP Server Configuration"
+    log_message "INFO" "Starting MCP servers configuration process"
+    
+    # Check Claude CLI availability (refresh status)
+    if command_exists claude; then
+        CLAUDE_CLI_INSTALLED=true
+        log_message "INFO" "Claude CLI detected and available"
+    else
+        CLAUDE_CLI_INSTALLED=false
+        log_message "ERROR" "Claude CLI not found in PATH"
+    fi
     
     if [ "$CLAUDE_CLI_INSTALLED" = false ]; then
         print_status "missing" "Claude CLI is required. Please install it first:"
         print_status "info" "Visit: https://github.com/anthropics/claude-cli"
+        log_message "ERROR" "MCP servers setup failed: Claude CLI not installed"
         return 1
     fi
     
     # Context7
     if ! claude mcp info context7 >/dev/null 2>&1; then
         if ask_yes_no "Configure Context7 MCP? (for version-specific docs)" "y"; then
-            local context7_key=$(get_api_key "Context7" "CONTEXT7_API_KEY" \
-                "To get a Context7 API key:\n  1. Visit: https://context7.ai\n  2. Sign up for an account\n  3. Go to API settings\n  4. Generate a new API key")
-            
-            if [ "$context7_key" != "SKIP" ]; then
-                configure_mcp_server "context7" "npx -y @upstash/context7-mcp@latest" \
-                    "CONTEXT7_API_KEY=$context7_key"
-            fi
+            configure_mcp_server "context7" "npx -y @upstash/context7-mcp@latest"
         fi
     fi
     
@@ -629,8 +844,14 @@ setup_mcp_servers() {
             
             local namespace=$(get_input "Project namespace" "$default_namespace")
             
+            # Determine which port Memory Bank is using
+            local memory_bank_port=$(load_config "MEMORY_BANK_USED_PORT" "")
+            if [ -z "$memory_bank_port" ]; then
+                memory_bank_port=$(get_port "MEMORY_BANK_PORT" "$DEFAULT_MEMORY_BANK_PORT")
+            fi
+            
             configure_mcp_server "memory-bank" "npx -y memory-bank-mcp@latest" \
-                "MEMORY_BANK_URL=http://localhost:8080" \
+                "MEMORY_BANK_URL=http://localhost:$memory_bank_port" \
                 "MEMORY_NAMESPACE=$namespace"
         fi
     fi
@@ -647,8 +868,106 @@ show_menu() {
     echo "5) Run complete setup (all of the above)"
     echo "6) Verify MCP server connections"
     echo "7) Show troubleshooting help"
+    echo "8) View logs"
     echo "0) Exit"
     echo
+}
+
+# Function to view logs
+view_logs() {
+    print_header "Log Viewer"
+    
+    if [ ! -f "$LOG_FILE" ]; then
+        print_status "info" "No log file found for current session"
+        if [ -f "$LATEST_LOG_LINK" ]; then
+            print_status "info" "Showing latest available log..."
+            LOG_FILE="$LOG_DIR/$(readlink "$LATEST_LOG_LINK")"
+        else
+            print_status "missing" "No log files available"
+            return
+        fi
+    fi
+    
+    print_status "info" "Current log file: $LOG_FILE"
+    print_status "info" "Log directory: $LOG_DIR"
+    
+    echo
+    print_color "$CYAN" "Available log files:"
+    ls -la "$LOG_DIR"/*.log 2>/dev/null | while read -r line; do
+        echo "  $line"
+    done
+    
+    echo
+    print_color "$YELLOW" "Choose an option:"
+    echo "1) View latest log (last 50 lines)"
+    echo "2) View full latest log"
+    echo "3) View specific log file"
+    echo "4) Search logs for errors"
+    echo "5) Export current log"
+    echo "0) Back to main menu"
+    echo
+    
+    read -p "Select option: " log_choice
+    
+    case $log_choice in
+        1)
+            print_color "$CYAN" "Last 50 lines of current log:"
+            echo "----------------------------------------"
+            tail -n 50 "$LOG_FILE" 2>/dev/null || print_status "warning" "Could not read log file"
+            ;;
+        2)
+            print_color "$CYAN" "Full current log:"
+            echo "----------------------------------------"
+            cat "$LOG_FILE" 2>/dev/null || print_status "warning" "Could not read log file"
+            ;;
+        3)
+            echo
+            print_color "$CYAN" "Available log files:"
+            ls -1 "$LOG_DIR"/*.log 2>/dev/null | nl
+            echo
+            read -p "Enter log file number or name: " log_selection
+            
+            if [[ "$log_selection" =~ ^[0-9]+$ ]]; then
+                # Number selected
+                selected_file=$(ls -1 "$LOG_DIR"/*.log 2>/dev/null | sed -n "${log_selection}p")
+            else
+                # Name or path provided
+                if [[ "$log_selection" = *"/"* ]]; then
+                    selected_file="$log_selection"
+                else
+                    selected_file="$LOG_DIR/$log_selection"
+                fi
+            fi
+            
+            if [ -f "$selected_file" ]; then
+                print_color "$CYAN" "Contents of $selected_file:"
+                echo "----------------------------------------"
+                cat "$selected_file"
+            else
+                print_status "missing" "Log file not found: $selected_file"
+            fi
+            ;;
+        4)
+            print_color "$CYAN" "Searching for errors in logs..."
+            echo "----------------------------------------"
+            grep -n -i "error\|failed\|warning" "$LOG_FILE" 2>/dev/null || print_status "info" "No errors found in current log"
+            ;;
+        5)
+            local export_file="$HOME/supercoder-log-$(date +%Y%m%d-%H%M%S).txt"
+            cp "$LOG_FILE" "$export_file" 2>/dev/null
+            if [ $? -eq 0 ]; then
+                print_status "ok" "Log exported to: $export_file"
+            else
+                print_status "warning" "Failed to export log"
+            fi
+            ;;
+        0)
+            return
+            ;;
+        *)
+            print_status "warning" "Invalid option"
+            ;;
+    esac
 }
 
 # Function to show troubleshooting help
@@ -666,7 +985,7 @@ show_troubleshooting() {
     print_color "$YELLOW" "Memory Bank not responding:"
     echo "  - Check logs: docker logs memory-bank"
     echo "  - Restart: docker restart memory-bank"
-    echo "  - Check if port 8080 is in use: sudo lsof -i :8080"
+    echo "  - Check if port 8081 is in use: sudo lsof -i :8081"
     echo
     
     print_color "$YELLOW" "MCP server not working:"
@@ -762,6 +1081,12 @@ main() {
     # Parse command line arguments first
     parse_arguments "$@"
     
+    # Initialize logging system
+    init_logging "$@"
+    
+    # Load environment configuration
+    load_env
+    
     clear
     print_color "$CYAN" "╔════════════════════════════════════════════════════════════════╗"
     print_color "$CYAN" "║           SuperCoder MCP Setup - Interactive Installer          ║"
@@ -785,6 +1110,9 @@ main() {
     while true; do
         show_menu
         read -p "Select an option: " choice
+        
+        # Temporarily disable strict error handling for menu operations
+        set +e
         
         case $choice in
             1)
@@ -833,6 +1161,10 @@ main() {
                 show_troubleshooting
                 read -p "Press Enter to continue..."
                 ;;
+            8)
+                view_logs
+                read -p "Press Enter to continue..."
+                ;;
             0)
                 print_color "$GREEN" "Goodbye!"
                 exit 0
@@ -842,6 +1174,9 @@ main() {
                 sleep 2
                 ;;
         esac
+        
+        # Re-enable strict error handling
+        set -e
         
         clear
     done
